@@ -20,6 +20,7 @@ class DailyMeasurementRequest(BaseModel):
     current_accel_x: float = Field(..., description="현재 HW X축 가속도 Raw", example=0.08)
     current_accel_y: float = Field(..., description="현재 HW Y축 가속도 Raw", example=0.95)
     current_accel_z: float = Field(..., description="현재 HW Z축 가속도 Raw", example=0.25)
+    level: str = Field(default="normal", description="유저가 선택한 측정 난이도 (easy, normal, hard)", examples=["normal"])
 
 class DailyReportSaveRequest(BaseModel):
     member_id: int = Field(..., description="유저 고유 식별 ID", example=1)
