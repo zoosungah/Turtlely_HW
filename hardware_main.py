@@ -22,6 +22,12 @@ class DailyMeasurementRequest(BaseModel):
     current_accel_z: float = Field(..., description="현재 HW Z축 가속도 Raw", example=0.25)
     level: str = Field(default="normal", description="유저가 선택한 측정 난이도 (easy, normal, hard)", examples=["normal"])
 
+class DailyCalibrationRequest(BaseModel):
+    monthly_id: int = Field(..., description="유저의 기준 CVA를 조회하기 위한 월간 측정 ID", example=1)
+    current_accel_x: float = Field(..., description="현재 바른 자세에서의 HW X축 가속도 Raw", example=0.05)
+    current_accel_y: float = Field(..., description="현재 바른 자세에서의 HW Y축 가속도 Raw", example=0.98)
+    current_accel_z: float = Field(..., description="현재 바른 자세에서의 HW Z축 가속도 Raw", example=0.12)
+    
 class DailyReportSaveRequest(BaseModel):
     member_id: int = Field(..., description="유저 고유 식별 ID", example=1)
     angle: float = Field(..., description="측정된 목 각도", example=48.5)
@@ -37,6 +43,7 @@ DATABASE_URL = os.getenv(
     "DATABASE_URL", 
     "mysql+pymysql://root:choosungah03!@127.0.0.1:3306/turtlely_db"
 )
+# DATABASE_URL = "mysql+pymysql://root:choosungah03!@127.0.0.1:3306/turtlely_db"
 engine = create_engine(DATABASE_URL, pool_recycle=3600)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
@@ -200,6 +207,52 @@ async def track_daily_posture(data: DailyMeasurementRequest, db: Session = Depen
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post(
+    "/api/daily/calibration",
+    tags=["일일 측정 관련 API"],
+    summary="일일 측정 시작 전 착용 오차 보정을 위한 데일리 캘리브레이션",
+    description="""
+    ### [동작 흐름]
+    1. 사용자가 당일 기기 착용 후 '바른 자세'에서 0점 조절 요청
+    2. 기존 비전 기준 각도(base_cva)와 현재 가속도 기반 Pitch의 차이를 계산하여 새로운 일일 보정 상수 C 도출
+    3. 계산된 일일 보정 상수를 반환하여, 이후 실시간 측정(/api/daily) 시 사용할 수 있도록 함
+    """,
+    response_description="당일 착용 오차가 보정된 새로운 일일 보정 상수 C 반환"
+)
+async def process_daily_calibration(data: DailyCalibrationRequest, db: Session = Depends(get_db)):
+    try:
+        # 1. 기존 월간 기준 데이터(비전 CVA) 조회
+        measurement = db.query(MonthlyMeasurement).filter(MonthlyMeasurement.monthly_id == data.monthly_id).first()
+        if not measurement:
+            raise HTTPException(status_code=44, detail="기준 월간 데이터를 찾을 수 없습니다.")
+        
+        base_cva = measurement.cva_angle # 기준이 될 비전 각도
+
+        # 2. 현재 가속도 Raw 센서값 기반으로 현재 착용 상태의 Pitch 계산
+        vector_magnitude = math.sqrt(data.current_accel_x**2 + data.current_accel_y**2 + data.current_accel_z**2)
+        if vector_magnitude == 0: 
+            raise HTTPException(status_code=400, detail="가속도 벡터 크기가 0일 수 없습니다.")
+            
+        cos_val = max(-1.0, min(1.0, data.current_accel_z / vector_magnitude))
+        current_pitch = math.degrees(math.acos(cos_val))
+
+        # 3. 새로운 일일 보정 상수 계산 (비전CVA - 현재Pitch)
+        daily_constant_c = base_cva - current_pitch
+
+        # 매번 새로 갱신된 일일 보정 상수를 DB에 업데이트해 두고 싶다면 아래 주석을 푸세요.
+        # measurement.calibrationc = round(daily_constant_c, 2)
+        # db.commit()
+
+        return {
+            "status": "success",
+            "monthly_id": data.monthly_id,
+            "base_cva_angle": base_cva,
+            "current_hardware_pitch": round(current_pitch, 2),
+            "daily_derived_constant_c": round(daily_constant_c, 2)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
 
 @app.post("/api/daily/report", tags=["일일 측정 데이터 저장 API"], summary="일일 리포트를 위해 일일 측정 데이터 저장")
 async def save_daily_report(data: DailyReportSaveRequest, db: Session = Depends(get_db)):
