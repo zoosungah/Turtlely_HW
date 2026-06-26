@@ -14,9 +14,12 @@ class HardwareSyncRequest(BaseModel):
     opt_accel_x: float = Field(..., description="HW X축 가속도", example=0.05)
     opt_accel_y: float = Field(..., description="HW Y축 가속도", example=0.98)
     opt_accel_z: float = Field(..., description="HW Z축 가속도", example=0.12)
+    accumulated_caution_count: int = Field(0, description="지금까지 누적된 총 caution 알림 횟수", example=2)
+    accumulated_warning_count: int = Field(0, description="지금까지 누적된 총 warning 알림 횟수", example=1)
 
 class DailyMeasurementRequest(BaseModel):
     monthly_id: int = Field(..., description="최신 월간 측정 ID", example=1)
+    member_id: int = Field(..., description="유저 고유 식별 ID", example=1)
     current_accel_x: float = Field(..., description="현재 HW X축 가속도 Raw", example=0.08)
     current_accel_y: float = Field(..., description="현재 HW Y축 가속도 Raw", example=0.95)
     current_accel_z: float = Field(..., description="현재 HW Z축 가속도 Raw", example=0.25)
@@ -154,6 +157,7 @@ async def sync_hardware_constants(data: HardwareSyncRequest, db: Session = Depen
     - 어려움: 2도 이상 이탈 시
     - 보통: 5도 이상 이탈 시
     - 쉬움: 8도 이상 이탈 시
+    + 오늘 총 누적된 caution/warning 횟수 반환
     """,
     response_description="실시간으로 추정된 CVA 각도 및 판별 결과를 반환합니다."
 )
@@ -196,15 +200,51 @@ async def track_daily_posture(data: DailyMeasurementRequest, db: Session = Depen
         else:
             posture_status = "warning"
 
+
+        now_time = datetime.now()
+        new_measurement = DailyMeasurement(
+            member_id=data.member_id,
+            angle=estimated_cva,
+            posture_status=posture_status,
+            notification_trigger=True if posture_status in ["caution", "warning"] else False,
+            duration=1,  # 1초 주기로 요청이 오므로 지속 시간은 1초로 고정 저장
+            level=user_level,
+            measured_at=now_time,
+            created_at=now_time,
+            updated_at=now_time
+        )
+        db.add(new_measurement)
+        db.commit()  # 우선 현재 기록 저장 완료!
+
+        # 🔍 2. [핵심] 오늘 하루 동안 이 유저(member_id)가 쌓은 모든 내역 긁어모으기
+        # 오늘 날짜의 시작 시점(00:00:00) 계산
+        today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+
+        # 오늘 생성된 이 유저의 기록 중 posture_status가 caution인 개수 카운트
+        today_caution_count = db.query(DailyMeasurement).filter(
+            DailyMeasurement.member_id == data.member_id,
+            DailyMeasurement.created_at >= today_start,
+            DailyMeasurement.posture_status == "caution"
+        ).count()
+
+        # 오늘 생성된 이 유저의 기록 중 posture_status가 warning인 개수 카운트
+        today_warning_count = db.query(DailyMeasurement).filter(
+            DailyMeasurement.member_id == data.member_id,
+            DailyMeasurement.created_at >= today_start,
+            DailyMeasurement.posture_status == "warning"
+        ).count()
+
+        # 3. 최종 계산된 당일 총 누적 값을 응답으로 리턴!
         return {
             "status": "success",
             "estimated_cva": estimated_cva,
-            "base_cva_angle": base_cva,
-            "angle_deviation": round(angle_deviation, 2),
-            "applied_threshold": threshold,
-            "posture_result": posture_status
+            "posture_result": posture_status,
+            "caution_notification_count": today_caution_count,  # 오늘 누적된 총 caution 개수 
+            "warning_notification_count": today_warning_count   # 오늘 누적된 총 warning 개수 
         }
+    
     except Exception as e:
+        db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post(
