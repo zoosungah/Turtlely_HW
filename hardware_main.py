@@ -9,6 +9,9 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 import os
 
+# 인메모리 변수
+DAILY_MEMORY_CACHE = {}
+
 class HardwareSyncRequest(BaseModel):
     monthly_id: int = Field(..., description="월간 측정 ID", example=1)
     opt_accel_x: float = Field(..., description="HW X축 가속도", example=0.05)
@@ -64,26 +67,28 @@ class MonthlyMeasurement(Base):
     hw_accelz = Column(Float, nullable=True)
     calibrationc = Column(Float, nullable=True)
 
-class DailyMeasurement(Base):
-    __tablename__ = "daily_measurement"
-    
-    daily_id = Column(BigInteger, primary_key=True, autoincrement=True)
-    created_at = Column(DateTime, nullable=False, default=datetime.now)
-    updated_at = Column(DateTime, nullable=False, default=datetime.now, onupdate=datetime.now)
-    angle = Column(Float, nullable=False)
-    battery_level = Column(Integer, nullable=True)
-    duration = Column(Integer, nullable=False)
-    level = Column(String(50), nullable=True)
-    measured_at = Column(DateTime, nullable=True, default=datetime.now)
-    notification_trigger = Column(Boolean, nullable=False, default=False)
-    posture_status = Column(String(50), nullable=True)
-    member_id = Column(BigInteger, nullable=True)
+#class DailyMeasurement(Base):
+#    __tablename__ = "daily_measurement"
+#    
+#    daily_id = Column(BigInteger, primary_key=True, autoincrement=True)
+#    created_at = Column(DateTime, nullable=False, default=datetime.now)
+#    updated_at = Column(DateTime, nullable=False, default=datetime.now, onupdate=datetime.now)
+#    angle = Column(Float, nullable=False)
+#    battery_level = Column(Integer, nullable=True)
+#    duration = Column(Integer, nullable=False)
+#    level = Column(String(50), nullable=True)
+#    measured_at = Column(DateTime, nullable=True, default=datetime.now)
+#    notification_trigger = Column(Boolean, nullable=False, default=False)
+#    posture_status = Column(String(50), nullable=True)
+#    member_id = Column(BigInteger, nullable=True)
 
 
 def get_db():
     db = SessionLocal()
-    try: yield db
-    finally: db.close()
+    try: 
+        yield db
+    finally: 
+        db.close()
 
 
 app = FastAPI(
@@ -201,46 +206,39 @@ async def track_daily_posture(data: DailyMeasurementRequest, db: Session = Depen
             posture_status = "warning"
 
 
-        now_time = datetime.now()
-        new_measurement = DailyMeasurement(
-            member_id=data.member_id,
-            angle=estimated_cva,
-            posture_status=posture_status,
-            notification_trigger=True if posture_status in ["caution", "warning"] else False,
-            duration=1,  # 1초 주기로 요청이 오므로 지속 시간은 1초로 고정 저장
-            level=user_level,
-            measured_at=now_time,
-            created_at=now_time,
-            updated_at=now_time
-        )
-        db.add(new_measurement)
-        db.commit()  # 우선 현재 기록 저장 완료!
+        user_id = data.member_id
+        if user_id not in DAILY_MEMORY_CACHE:
+            DAILY_MEMORY_CACHE[user_id] = {
+                "total_duration": 0,
+                "cva_sum": 0.0,
+                "normal_duration": 0,
+                "caution_count": 0,
+                "warning_count": 0
+            }
+        
+        DAILY_MEMORY_CACHE[user_id]["total_duration"] += 1
+        DAILY_MEMORY_CACHE[user_id]["cva_sum"] = round(DAILY_MEMORY_CACHE[user_id]["cva_sum"] + estimated_cva, 2)
+        
+        if posture_status == "normal":
+            DAILY_MEMORY_CACHE[user_id]["normal_duration"] += 1
+        elif posture_status == "caution":
+            DAILY_MEMORY_CACHE[user_id]["caution_count"] += 1
+        elif posture_status == "warning":
+            DAILY_MEMORY_CACHE[user_id]["warning_count"] += 1
 
-        # 🔍 2. [핵심] 오늘 하루 동안 이 유저(member_id)가 쌓은 모든 내역 긁어모으기
-        # 오늘 날짜의 시작 시점(00:00:00) 계산
-        today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-
-        # 오늘 생성된 이 유저의 기록 중 posture_status가 caution인 개수 카운트
-        today_caution_count = db.query(DailyMeasurement).filter(
-            DailyMeasurement.member_id == data.member_id,
-            DailyMeasurement.created_at >= today_start,
-            DailyMeasurement.posture_status == "caution"
-        ).count()
-
-        # 오늘 생성된 이 유저의 기록 중 posture_status가 warning인 개수 카운트
-        today_warning_count = db.query(DailyMeasurement).filter(
-            DailyMeasurement.member_id == data.member_id,
-            DailyMeasurement.created_at >= today_start,
-            DailyMeasurement.posture_status == "warning"
-        ).count()
-
-        # 3. 최종 계산된 당일 총 누적 값을 응답으로 리턴!
+        # 5. 디버깅 및 실시간 앱 UI 연동을 위해 누적 데이터 전부 반환
+        user_snapshot = DAILY_MEMORY_CACHE[user_id]
         return {
             "status": "success",
             "estimated_cva": estimated_cva,
             "posture_result": posture_status,
-            "caution_notification_count": today_caution_count,  # 오늘 누적된 총 caution 개수 
-            "warning_notification_count": today_warning_count   # 오늘 누적된 총 warning 개수 
+            "server_accumulated_data": {
+                "total_duration": user_snapshot["total_duration"],
+                "cva_sum": user_snapshot["cva_sum"],
+                "normal_duration": user_snapshot["normal_duration"],
+                "caution_count": user_snapshot["caution_count"],
+                "warning_count": user_snapshot["warning_count"]
+            }
         }
     
     except Exception as e:
@@ -294,31 +292,31 @@ async def process_daily_calibration(data: DailyCalibrationRequest, db: Session =
         raise HTTPException(status_code=500, detail=str(e))
     
 
-@app.post("/api/daily/report", tags=["일일 측정 데이터 저장 API"], summary="일일 리포트를 위해 일일 측정 데이터 저장")
-async def save_daily_report(data: DailyReportSaveRequest, db: Session = Depends(get_db)):
-    try:
-        now_time = datetime.now()
-        new_report = DailyMeasurement(
-            member_id=data.member_id,
-            angle=data.angle,
-            posture_status=data.postureStatus.lower(),
-            notification_trigger=data.notificationTrigger,
-            duration=data.duration,
-            level=data.level.lower(),
-            battery_level=data.batteryLevel,
-            measured_at=now_time,
-            created_at=now_time,
-            updated_at=now_time
-        )
-        db.add(new_report)
-        db.commit()
-        db.refresh(new_report)
-        
-        return {
-            "status": "success",
-            "message": "일일 리포트 저장이 완료되었습니다.",
-            "daily_id": new_report.daily_id
-        }
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
+#@app.post("/api/daily/report", tags=["일일 측정 데이터 저장 API"], summary="일일 리포트를 위해 일일 측정 데이터 저장")
+#async def save_daily_report(data: DailyReportSaveRequest, db: Session = Depends(get_db)):
+#    try:
+#        now_time = datetime.now()
+#        new_report = DailyMeasurement(
+#            member_id=data.member_id,
+#            angle=data.angle,
+#            posture_status=data.postureStatus.lower(),
+#            notification_trigger=data.notificationTrigger,
+#            duration=data.duration,
+#            level=data.level.lower(),
+#            battery_level=data.batteryLevel,
+#            measured_at=now_time,
+#            created_at=now_time,
+#            updated_at=now_time
+#        )
+#        db.add(new_report)
+#        db.commit()
+#        db.refresh(new_report)
+#        
+#        return {
+#            "status": "success",
+#            "message": "일일 리포트 저장이 완료되었습니다.",
+#            "daily_id": new_report.daily_id
+#        }
+#    except Exception as e:
+#        db.rollback()
+#        raise HTTPException(status_code=500, detail=str(e))
