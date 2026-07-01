@@ -7,6 +7,7 @@ from typing import Optional
 from sqlalchemy import create_engine, Column, Float, String, Text, DateTime, BigInteger, Boolean, Integer
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
+from apscheduler.schedulers.background import BackgroundScheduler
 import os
 
 # 인메모리 변수
@@ -290,7 +291,56 @@ async def process_daily_calibration(data: DailyCalibrationRequest, db: Session =
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    
+
+def auto_save_daily_reports():
+    db: Session = SessionLocal()
+    try:
+        now = datetime.now()
+        report_date = now.date()
+        
+        for member_id, report_data in list(DAILY_MEMORY_CACHE.items()):
+            total_time = report_data["total_duration"]
+            if total_time == 0:
+                continue
+                
+            # 성아님의 핵심 기획 수식 연산 프로세스
+            avg_angle = round(report_data["cva_sum"] / total_time, 2)
+            total_score = int(round((report_data["normal_duration"] / total_time) * 100))
+            
+            # daily_report 테이블 스키마 컬럼 구조에 맞춰 직접 인서트
+            db.execute(
+                "INSERT INTO daily_report (member_id, report_date, total_score, cva_sum, "
+                "total_measurement_duration, normal_duration, caution_duration, warning_duration, "
+                "avg_angle, total_notification_count, created_at, updated_at) "
+                "VALUES (:member_id, :report_date, :total_score, :cva_sum, :total_time, "
+                ":normal, :caution, :warning, :avg_angle, :noti_count, :now, :now)",
+                {
+                    "member_id": member_id, "report_date": report_date, "total_score": total_score,
+                    "cva_sum": report_data["cva_sum"], "total_time": total_time,
+                    "normal": report_data["normal_duration"], 
+                    "caution": report_data["caution_count"],  # caution 시간 데이터 대용
+                    "warning": report_data["warning_count"],  # warning 시간 데이터 대용
+                    "avg_angle": avg_angle,
+                    "noti_count": report_data["caution_count"] + report_data["warning_count"],
+                    "now": now
+                }
+            )
+        db.commit()
+        
+        # 날짜 정산 완료 후 오늘 자 캐시 초기화
+        DAILY_MEMORY_CACHE.clear()
+        print(f"[{now}] 데일리 리포트 자동 마감 배치 정산 완료!")
+        
+    except Exception as e:
+        db.rollback()
+        print(f"자동 마감 배치 에러 발생: {str(e)}")
+    finally:
+        db.close()
+
+# 백그라운드 스케줄러 등록 및 가동 시작
+scheduler = BackgroundScheduler(timezone="Asia/Seoul")
+scheduler.add_job(auto_save_daily_reports, 'cron', hour=23, minute=59, second=0)
+scheduler.start()
 
 #@app.post("/api/daily/report", tags=["일일 측정 데이터 저장 API"], summary="일일 리포트를 위해 일일 측정 데이터 저장")
 #async def save_daily_report(data: DailyReportSaveRequest, db: Session = Depends(get_db)):
