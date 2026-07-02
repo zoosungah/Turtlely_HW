@@ -18,8 +18,8 @@ class HardwareSyncRequest(BaseModel):
     opt_accel_x: float = Field(..., description="HW X축 가속도", example=0.05)
     opt_accel_y: float = Field(..., description="HW Y축 가속도", example=0.98)
     opt_accel_z: float = Field(..., description="HW Z축 가속도", example=0.12)
-    accumulated_caution_count: int = Field(0, description="지금까지 누적된 총 caution 알림 횟수", example=2)
-    accumulated_warning_count: int = Field(0, description="지금까지 누적된 총 warning 알림 횟수", example=1)
+#    accumulated_caution_count: int = Field(0, description="지금까지 누적된 총 caution 알림 횟수", example=2)
+#    accumulated_warning_count: int = Field(0, description="지금까지 누적된 총 warning 알림 횟수", example=1)
 
 class DailyMeasurementRequest(BaseModel):
     monthly_id: int = Field(..., description="최신 월간 측정 ID", example=1)
