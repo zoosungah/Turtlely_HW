@@ -370,3 +370,18 @@ scheduler.start()
 #    except Exception as e:
 #        db.rollback()
 #        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/daily/memory-check", tags=["디버깅용 임시 API"])
+async def check_current_memory_cache():
+    """
+    ### 일일 측정 데이터 디버깅용 api...
+    밤 23:59 배치 정산이 돌기 전, 현재 파이썬 에 
+    실시간으로 모이고 있는 유저별 일일 측정 누적 데이터를 그대로 반환합니다.
+    """
+    return {
+        "status": "success",
+        "current_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "cached_users_count": len(DAILY_MEMORY_CACHE),
+        "data": DAILY_MEMORY_CACHE  # 현재 메모리에 모인 날것의 딕셔너리 통째로 출력
+    }
