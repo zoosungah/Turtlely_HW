@@ -307,6 +307,26 @@ def auto_save_daily_reports():
             # 성아님의 핵심 기획 수식 연산 프로세스
             avg_angle = round(report_data["cva_sum"] / total_time, 2)
             total_score = int(round((report_data["normal_duration"] / total_time) * 100))
+
+            db.execute(
+                text(
+                    "INSERT INTO daily_report (member_id, report_date, total_score, cva_sum, "
+                    "total_measurement_duration, normal_duration, caution_duration, warning_duration, "
+                    "avg_angle, total_notification_count, created_at, updated_at) "
+                    "VALUES (:member_id, :report_date, :total_score, :cva_sum, :total_time, "
+                    ":normal, :caution, :warning, :avg_angle, :noti_count, :now, :now)"
+                    ),
+                {
+                    "member_id": member_id, "report_date": report_date, "total_score": total_score,
+                    "cva_sum": report_data["cva_sum"], "total_time": total_time,
+                    "normal": report_data["normal_duration"],
+                    "caution": report_data["caution_count"],
+                    "warning": report_data["warning_count"],
+                    "avg_angle": avg_angle,
+                    "noti_count": report_data["caution_count"] + report_data["warning_count"],
+                    "now": now
+                    }
+                )
             
             # daily_report 테이블 스키마 컬럼 구조에 맞춰 직접 인서트
 #            db.execute(
@@ -327,25 +347,6 @@ def auto_save_daily_reports():
 #                }
 #            )
 
-db.execute(
-    text(
-        "INSERT INTO daily_report (member_id, report_date, total_score, cva_sum, "
-        "total_measurement_duration, normal_duration, caution_duration, warning_duration, "
-        "avg_angle, total_notification_count, created_at, updated_at) "
-        "VALUES (:member_id, :report_date, :total_score, :cva_sum, :total_time, "
-        ":normal, :caution, :warning, :avg_angle, :noti_count, :now, :now)"
-    ),
-    {
-        "member_id": member_id, "report_date": report_date, "total_score": total_score,
-        "cva_sum": report_data["cva_sum"], "total_time": total_time,
-        "normal": report_data["normal_duration"], 
-        "caution": report_data["caution_count"], 
-        "warning": report_data["warning_count"], 
-        "avg_angle": avg_angle,
-        "noti_count": report_data["caution_count"] + report_data["warning_count"],
-        "now": now
-    }
-)
         db.commit()
         
         # 날짜 정산 완료 후 오늘 자 캐시 초기화
