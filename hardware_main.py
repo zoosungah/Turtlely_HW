@@ -361,7 +361,7 @@ def auto_save_daily_reports():
 
 # 백그라운드 스케줄러 등록 및 가동 시작
 scheduler = BackgroundScheduler(timezone="Asia/Seoul")
-scheduler.add_job(auto_save_daily_reports, 'cron', hour=1, minute=30, second=0)
+scheduler.add_job(auto_save_daily_reports, 'cron', hour=23, minute=59, second=0)
 scheduler.start()
 
 #@app.post("/api/daily/report", tags=["일일 측정 데이터 저장 API"], summary="일일 리포트를 위해 일일 측정 데이터 저장")
