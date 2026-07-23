@@ -238,6 +238,13 @@ async def track_daily_posture(data: DailyMeasurementRequest, db: Session = Depen
             2
         )
 
+        print("=" * 50)
+        print(f"base_cva       = {base_cva}")
+        print(f"constant_c     = {constant_c}")
+        print(f"current_pitch  = {current_hw_pitch}")
+        print(f"estimated_cva  = {estimated_cva}")
+
+
         # 난이도별 오차 임계치(Threshold) 매핑
         user_level = data.level.lower()
         if user_level == "hard":
@@ -257,6 +264,11 @@ async def track_daily_posture(data: DailyMeasurementRequest, db: Session = Depen
         else:
             posture_status = "warning"
 
+
+        print(f"angle_deviation = {angle_deviation}")
+        print(f"threshold       = {threshold}")
+        print(f"posture_result  = {posture_status}")
+        print("=" * 50)
 
         user_id = data.member_id
         if user_id not in DAILY_MEMORY_CACHE:
@@ -468,5 +480,5 @@ async def check_current_memory_cache():
         "current_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "cached_users_count": len(DAILY_MEMORY_CACHE),
         "data": DAILY_MEMORY_CACHE  # 현재 메모리에 모인 날것의 딕셔너리 통째로 출력
-    }
+    } 
 
