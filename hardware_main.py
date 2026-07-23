@@ -84,6 +84,31 @@ class MonthlyMeasurement(Base):
 #    posture_status = Column(String(50), nullable=True)
 #    member_id = Column(BigInteger, nullable=True)
 
+def calculate_hw_pitch(acc_x: float, acc_y: float, acc_z: float) -> float:
+    """
+    터틀훅 3축 가속도 데이터에서 앞뒤 숙임 각도를 계산한다.
+
+    현재 터틀훅을 왼쪽 귀에 정상 방향으로 착용했을 때:
+    - 정면: 상대적으로 작은 각도
+    - 목을 앞으로 숙임: 각도 증가
+    """
+
+    vector_magnitude = math.sqrt(
+        acc_x ** 2
+        + acc_y ** 2
+        + acc_z ** 2
+    )
+
+    if vector_magnitude == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="가속도 벡터 크기가 0일 수 없습니다."
+        )
+
+    # 실제 측정 결과에서 앞뒤 숙임을 가장 잘 반영한 공식
+    return math.degrees(
+        math.atan2(-acc_x, acc_y)
+    )
 
 def get_db():
     db = SessionLocal()
@@ -131,12 +156,24 @@ async def sync_hardware_constants(data: HardwareSyncRequest, db: Session = Depen
         vector_magnitude = math.sqrt(data.opt_accel_x**2 + data.opt_accel_y**2 + data.opt_accel_z**2)
         if vector_magnitude == 0:
             raise HTTPException(status_code=400, detail="벡터 크기가 0일 수 없습니다.")
-            
-        cos_val = max(-1.0, min(1.0, data.opt_accel_z / vector_magnitude))
-        hw_pitch = math.degrees(math.acos(cos_val))
+         # 월간 측정 시점의 센서 기준 각도
+        hw_pitch = calculate_hw_pitch(
+            data.opt_accel_x,
+            data.opt_accel_y,
+            data.opt_accel_z
+        )
 
-        K_constant = 1.0
-        computed_c = measurement.cva_angle - (K_constant * hw_pitch)
+        # 목을 숙일수록 hw_pitch는 증가하고 CVA는 감소하므로
+        # CVA = C - hw_pitch 형태로 사용
+        computed_c = measurement.cva_angle + hw_pitch
+        
+#        cos_val = max(-1.0, min(1.0, data.opt_accel_z / vector_magnitude))
+#        hw_pitch = math.degrees(math.acos(cos_val))
+
+#        K_constant = 1.0
+#        computed_c = measurement.cva_angle - (K_constant * hw_pitch)
+
+        
 
         # 컬럼값 저장
         measurement.hw_accelx = data.opt_accel_x
@@ -180,13 +217,26 @@ async def track_daily_posture(data: DailyMeasurementRequest, db: Session = Depen
         base_cva = measurement.cva_angle  # 유저의 최적 정상 자세일 때의 비전 각도
 
         # 실시간 센서값 기반 현재 목 각도 연산
-        vector_magnitude = math.sqrt(data.current_accel_x**2 + data.current_accel_y**2 + data.current_accel_z**2)
-        if vector_magnitude == 0: raise HTTPException(status_code=400, detail="실시간 가속도 벡터 크기가 0일 수 없습니다.")
+#        vector_magnitude = math.sqrt(data.current_accel_x**2 + data.current_accel_y**2 + data.current_accel_z**2)
+#        if vector_magnitude == 0: raise HTTPException(status_code=400, detail="실시간 가속도 벡터 크기가 0일 수 없습니다.")
             
-        cos_val = max(-1.0, min(1.0, data.current_accel_z / vector_magnitude))
-        current_hw_pitch = math.degrees(math.acos(cos_val))
+#        cos_val = max(-1.0, min(1.0, data.current_accel_z / vector_magnitude))
+#        current_hw_pitch = math.degrees(math.acos(cos_val))
 
-        estimated_cva = round(current_hw_pitch + constant_c, 2)
+#        estimated_cva = round(current_hw_pitch + constant_c, 2)
+
+        # 현재 센서 데이터 기반 앞뒤 숙임 각도
+        current_hw_pitch = calculate_hw_pitch(
+            data.current_accel_x,
+            data.current_accel_y,
+            data.current_accel_z
+        )
+
+        # 목을 숙일수록 센서각도는 증가하고 CVA는 감소
+        estimated_cva = round(
+            constant_c - current_hw_pitch,
+            2
+        )
 
         # 난이도별 오차 임계치(Threshold) 매핑
         user_level = data.level.lower()
@@ -274,14 +324,19 @@ async def process_daily_calibration(data: DailyCalibrationRequest, db: Session =
             raise HTTPException(status_code=400, detail="가속도 벡터 크기가 0일 수 없습니다.")
             
         cos_val = max(-1.0, min(1.0, data.current_accel_z / vector_magnitude))
-        current_pitch = math.degrees(math.acos(cos_val))
+        # current_pitch = math.degrees(math.acos(cos_val))
+        current_pitch = calculate_hw_pitch(
+            data.current_accel_x,
+            data.current_accel_y,
+            data.current_accel_z
+        )
 
         # 3. 새로운 일일 보정 상수 계산 (비전CVA - 현재Pitch)
-        daily_constant_c = base_cva - current_pitch
+        daily_constant_c = base_cva + current_pitch
 
         # 매번 새로 갱신된 일일 보정 상수를 DB에 업데이트해 두고 싶다면 아래 주석을 푸세요.
-        # measurement.calibrationc = round(daily_constant_c, 2)
-        # db.commit()
+        measurement.calibrationc = round(daily_constant_c, 2)
+        db.commit()
 
         return {
             "status": "success",
@@ -407,3 +462,4 @@ async def check_current_memory_cache():
         "cached_users_count": len(DAILY_MEMORY_CACHE),
         "data": DAILY_MEMORY_CACHE  # 현재 메모리에 모인 날것의 딕셔너리 통째로 출력
     }
+
