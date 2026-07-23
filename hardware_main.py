@@ -313,6 +313,7 @@ async def track_daily_posture(data: DailyMeasurementRequest, db: Session = Depen
         }
     
     except Exception as e:
+        print("ERROR:", repr(e))
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -365,6 +366,8 @@ async def process_daily_calibration(data: DailyCalibrationRequest, db: Session =
             "daily_derived_constant_c": round(daily_constant_c, 2)
         }
     except Exception as e:
+        print("ERROR:", repr(e))
+        db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
 def auto_save_daily_reports():
