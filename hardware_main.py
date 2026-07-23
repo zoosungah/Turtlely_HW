@@ -179,7 +179,7 @@ async def track_daily_posture(data: DailyMeasurementRequest, db: Session = Depen
         constant_c = measurement.calibrationc
         base_cva = measurement.cva_angle  # 유저의 최적 정상 자세일 때의 비전 각도
 
-        # 실시간 센서값 기반 현재 목 각도 추정 연산
+        # 실시간 센서값 기반 현재 목 각도 연산
         vector_magnitude = math.sqrt(data.current_accel_x**2 + data.current_accel_y**2 + data.current_accel_z**2)
         if vector_magnitude == 0: raise HTTPException(status_code=400, detail="실시간 가속도 벡터 크기가 0일 수 없습니다.")
             
