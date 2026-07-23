@@ -282,6 +282,13 @@ async def track_daily_posture(data: DailyMeasurementRequest, db: Session = Depen
         user_snapshot = DAILY_MEMORY_CACHE[user_id]
         return {
             "status": "success",
+
+            "base_cva": base_cva,
+            "constant_c": constant_c,
+            "current_hw_pitch": round(current_hw_pitch, 2),
+            "angle_deviation": round(angle_deviation, 2),
+
+            
             "estimated_cva": estimated_cva,
             "posture_result": posture_status,
             "server_accumulated_data": {
