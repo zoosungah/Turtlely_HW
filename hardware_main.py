@@ -239,26 +239,31 @@ async def track_daily_posture(data: DailyMeasurementRequest, db: Session = Depen
 
         if current_state == "normal":
             user_cache["normal_duration"] += 1
-            # 바른 자세로 돌아오면 연속 카운터 리셋
+            # 바른 자세로 돌아오면 스트릭(연속 카운터) 즉시 리셋
             user_cache["caution_streak"] = 0
             user_cache["warning_streak"] = 0
 
         elif current_state == "caution":
-            user_cache["caution_count"] += 1
             user_cache["caution_streak"] += 1
             user_cache["warning_streak"] = 0  # warning 스트릭 초기화
 
-            # 주의 상태가 3초 이상 지속된 경우
-            if user_cache["caution_streak"] >= 3:
+            # 정확히 3초째가 되는 순간 "딱 1번" 진동 알림 발생 & 알림 횟수 카운트
+            if user_cache["caution_streak"] == 3:
+                vibration_type = "caution"
+                user_cache["caution_count"] += 1  # 💡 실제 진동 알림 발생 횟수만 1 증가
+            elif user_cache["caution_streak"] > 3:
+                # 3초 이후에도 계속 주의 상태일 때 (필요에 따라 "caution" 유지 혹은 "none")
                 vibration_type = "caution"
 
         elif current_state == "warning":
-            user_cache["warning_count"] += 1
             user_cache["warning_streak"] += 1
             user_cache["caution_streak"] = 0  # caution 스트릭 초기화
 
-            # 경고 상태가 3초 이상 지속된 경우
-            if user_cache["warning_streak"] >= 3:
+            # 정확히 3초째가 되는 순간 "딱 1번" 진동 알림 발생 & 알림 횟수 카운트
+            if user_cache["warning_streak"] == 3:
+                vibration_type = "warning"
+                user_cache["warning_count"] += 1  # 💡 실제 진동 알림 발생 횟수만 1 증가
+            elif user_cache["warning_streak"] > 3:
                 vibration_type = "warning"
 
         print("=" * 50)
