@@ -46,11 +46,12 @@ class DailyReportSaveRequest(BaseModel):
 
 
 # 도커 MySQL 연결 설정
-DATABASE_URL = os.getenv(
-    "DATABASE_URL", 
-    "mysql+pymysql://0215@127.0.0.1:3306/turtlely_db"
-)
-# DATABASE_URL = "mysql+pymysql://root:choosungah03!@127.0.0.1:3306/turtlely_db"
+# DATABASE_URL = os.getenv(
+#    "DATABASE_URL", 
+#    "mysql+pymysql://0215@127.0.0.1:3306/turtlely_db"
+#)
+
+DATABASE_URL = "mysql+pymysql://root:choosungah03!@127.0.0.1:3306/turtlely_db"
 engine = create_engine(DATABASE_URL, pool_recycle=3600)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
