@@ -210,11 +210,22 @@ async def track_daily_posture(data: DailyMeasurementRequest, db: Session = Depen
 
         angle_deviation = round(base_cva - estimated_cva, 2)
 
-        if angle_deviation < 8.0:
+        user_level = data.level.lower() if data.level else "normal"
+
+        if user_level == "hard":
+            caution_threshold = 2.0
+        elif user_level == "easy":
+            caution_threshold = 8.0
+        else:  # "normal"
+            caution_threshold = 5.0
+
+        warning_threshold = 15.0
+
+        if angle_deviation < caution_threshold:
             current_state = "normal"
-        elif 8.0 <= angle_deviation < 15.0:
+        elif caution_threshold <= angle_deviation < warning_threshold:
             current_state = "caution"
-        else: # angle_deviation >= 15.0
+        else:
             current_state = "warning"
 
         # 5. 메모리 캐시 유저 세션 초기화 (지속 시간 트래킹용 변수 추가)
