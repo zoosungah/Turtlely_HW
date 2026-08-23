@@ -279,6 +279,12 @@ async def track_daily_posture(data: DailyMeasurementRequest, db: Session = Depen
                 vibration_type = "warning"
 
         print("=" * 50)
+        print(f"🆔 monthly_id: {data.monthly_id} | member_id: {user_id}")
+        print(f"📊 Constant C: {constant_c:.2f} | Current Pitch: {current_hw_pitch:.2f}°")
+        print(f"🎯 Base CVA: {base_cva:.2f}° -> Estimated CVA: {estimated_cva:.2f}°")
+        print(f"⚠️ 이탈 각도: {angle_deviation:+.2f}° | 상태: {current_state} (C-streak: {user_cache['caution_streak']}s, W-streak: {user_cache['warning_streak']}s)")
+        print(f"📳 진동 명령: {vibration_type}")
+        print("-" * 20)
         print(f"base_cva         = {base_cva}")
         print(f"estimated_cva    = {estimated_cva}")
         print(f"angle_deviation  = {angle_deviation}")
