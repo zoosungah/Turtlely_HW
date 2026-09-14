@@ -201,6 +201,14 @@ async def track_daily_posture(
     db: Session = Depends(get_db)
 ):
     try:
+        print("=" * 60)
+        print("📥 DAILY RAW SENSOR REQUEST")
+        print(f"monthly_id = {data.monthly_id}")
+        print(f"member_id = {data.member_id}")
+        print(f"X = {data.current_accel_x}")
+        print(f"Y = {data.current_accel_y}")
+        print(f"Z = {data.current_accel_z}")
+        print("=" * 60)
         # =====================================================
         # 1. 월간 측정 기준값 조회
         # =====================================================
