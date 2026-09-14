@@ -297,28 +297,28 @@ async def track_daily_posture(
 
 
         # =====================================================
-# 4. Pitch 연속성 보정 + 이동평균 적용
-# =====================================================
+        # 4. Pitch 연속성 보정 + 이동평균 적용
+        # =====================================================
 
-pitch_window = user_cache["pitch_window"]
+        pitch_window = user_cache["pitch_window"]
 
-# 기존 Pitch가 있다면 ±180° 경계 보정
-if len(pitch_window) > 0:
-    reference_pitch = pitch_window[-1]
+        # 기존 Pitch가 있다면 ±180° 경계 보정
+        if len(pitch_window) > 0:
+            reference_pitch = pitch_window[-1]
 
-    adjusted_pitch = unwrap_angle(
-        raw_pitch,
-        reference_pitch
-    )
-else:
-    adjusted_pitch = raw_pitch
+            adjusted_pitch = unwrap_angle(
+                raw_pitch,
+                reference_pitch
+            )
+        else:
+            adjusted_pitch = raw_pitch
 
-pitch_window.append(adjusted_pitch)
+        pitch_window.append(adjusted_pitch)
 
-filtered_pitch = (
-    sum(pitch_window)
-    / len(pitch_window)
-)
+        filtered_pitch = (
+            sum(pitch_window)
+            / len(pitch_window)
+        )
 
 
         # =====================================================
@@ -502,10 +502,10 @@ filtered_pitch = (
         )
 
         print(
-    f"📡 Raw Pitch: {raw_pitch:.2f}° "
-    f"| Adjusted Pitch: {adjusted_pitch:.2f}° "
-    f"| Filtered Pitch: {filtered_pitch:.2f}°"
-)
+            f"📡 Raw Pitch: {raw_pitch:.2f}° "
+            f"| Adjusted Pitch: {adjusted_pitch:.2f}° "
+            f"| Filtered Pitch: {filtered_pitch:.2f}°"
+        )
 
         print(
             f"🎯 Base CVA: {base_cva:.2f}° "
@@ -653,18 +653,18 @@ async def process_daily_calibration(data: DailyCalibrationRequest, db: Session =
         db.commit()
 
         # =====================================================
-# 새로운 일일 측정 시작이므로 기존 실시간 캐시 초기화
-# =====================================================
+        # 새로운 일일 측정 시작이므로 기존 실시간 캐시 초기화
+        # =====================================================
 
-member_id = measurement.member_id
+        member_id = measurement.member_id
 
-if member_id in DAILY_MEMORY_CACHE:
-    del DAILY_MEMORY_CACHE[member_id]
+        if member_id in DAILY_MEMORY_CACHE:
+            del DAILY_MEMORY_CACHE[member_id]
 
-print(
-    f"🧹 DAILY CACHE RESET | "
-    f"member_id={member_id}"
-)
+        print(
+            f"🧹 DAILY CACHE RESET | "
+            f"member_id={member_id}"
+        )
 
         return {
             "status": "success",
@@ -673,10 +673,17 @@ print(
             "current_hardware_pitch": round(current_pitch, 2),
             "daily_derived_constant_c": round(daily_constant_c, 2)
         }
+
+    except HTTPException:
+        raise
+
     except Exception as e:
         print("ERROR:", repr(e))
         db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
 
 def auto_save_daily_reports():
     db: Session = SessionLocal()
