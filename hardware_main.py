@@ -578,6 +578,13 @@ async def track_daily_posture(
 )
 async def process_daily_calibration(data: DailyCalibrationRequest, db: Session = Depends(get_db)):
     try:
+        print("=" * 50)
+        print("📥 DAILY CALIBRATION REQUEST")
+        print(f"monthly_id = {data.monthly_id}")
+        print(f"X = {data.current_accel_x}")
+        print(f"Y = {data.current_accel_y}")
+        print(f"Z = {data.current_accel_z}")
+        print("=" * 50)
         # 1. 기존 월간 기준 데이터(비전 CVA) 조회
         measurement = db.query(MonthlyMeasurement).filter(MonthlyMeasurement.monthly_id == data.monthly_id).first()
         if not measurement:
