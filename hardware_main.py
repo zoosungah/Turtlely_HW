@@ -297,41 +297,41 @@ async def track_daily_posture(
 
 
         # =====================================================
-        # 4. Pitch 연속성 보정 + 이동평균 적용
+        # 4. 캘리브레이션 기준 상대 각도 계산 + MA5
         # =====================================================
 
+        # 일일 캘리브레이션 당시의 기준 Pitch
+        baseline_pitch = constant_c - base_cva
+
+        # atan2의 ±180° 경계를 고려한 현재 Pitch 변화량
+        raw_delta = (
+            (raw_pitch - baseline_pitch + 180) % 360
+        ) - 180
+
+        # 절대 Pitch가 아니라 변화량에 이동평균 적용
         pitch_window = user_cache["pitch_window"]
+        pitch_window.append(raw_delta)
 
-        # 기존 Pitch가 있다면 ±180° 경계 보정
-        if len(pitch_window) > 0:
-            reference_pitch = pitch_window[-1]
-
-            adjusted_pitch = unwrap_angle(
-                raw_pitch,
-                reference_pitch
-            )
-        else:
-            adjusted_pitch = raw_pitch
-
-        pitch_window.append(adjusted_pitch)
-
-        filtered_pitch = (
+        filtered_delta = (
             sum(pitch_window)
             / len(pitch_window)
         )
+
+        # 기존 API 응답 호환용
+        filtered_pitch = baseline_pitch + filtered_delta
 
 
         # =====================================================
         # 5. CVA 추정
         # =====================================================
 
-        estimated_cva = round(
-            constant_c - filtered_pitch,
+        angle_deviation = round(
+            filtered_delta,
             2
         )
 
-        angle_deviation = round(
-            base_cva - estimated_cva,
+        estimated_cva = round(
+            base_cva - angle_deviation,
             2
         )
 
@@ -503,8 +503,9 @@ async def track_daily_posture(
 
         print(
             f"📡 Raw Pitch: {raw_pitch:.2f}° "
-            f"| Adjusted Pitch: {adjusted_pitch:.2f}° "
-            f"| Filtered Pitch: {filtered_pitch:.2f}°"
+            f"| Baseline Pitch: {baseline_pitch:.2f}° "
+            f"| Raw Delta: {raw_delta:+.2f}° "
+            f"| Filtered Delta: {filtered_delta:+.2f}°"
         )
 
         print(
