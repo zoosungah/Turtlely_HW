@@ -9,11 +9,23 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from apscheduler.schedulers.background import BackgroundScheduler
 from sqlalchemy import text
+from collections import deque
+from datetime import datetime
 import time
 import os
 
 # 인메모리 변수
 DAILY_MEMORY_CACHE = {}
+
+# 실시간 피드백은 3 추천
+# 논문의 MA5와 동일하게 사용하려면 5로 변경
+FILTER_WINDOW = 5
+
+# 나쁜 자세가 이 시간 이상 지속되면 진동
+BAD_POSTURE_DURATION_SEC = 3.0
+
+# 임계값 주변에서 상태가 계속 바뀌는 현상 방지
+HYSTERESIS_DEG = 1.0
 
 class HardwareSyncRequest(BaseModel):
     monthly_id: int = Field(..., description="월간 측정 ID", example=1)
@@ -184,143 +196,373 @@ async def sync_hardware_constants(data: HardwareSyncRequest, db: Session = Depen
     response_description="실시간으로 추정된 CVA 각도 및 판별 결과를 반환합니다."
 )
 
-async def track_daily_posture(data: DailyMeasurementRequest, db: Session = Depends(get_db)):
+async def track_daily_posture(
+    data: DailyMeasurementRequest,
+    db: Session = Depends(get_db)
+):
     try:
-        # 유저의 월간 고유 보정 상수(C) 및 최초 측정 기준 CVA 조회
-        measurement = db.query(MonthlyMeasurement).filter(MonthlyMeasurement.monthly_id == data.monthly_id).first()
+        # =====================================================
+        # 1. 월간 측정 기준값 조회
+        # =====================================================
+
+        measurement = (
+            db.query(MonthlyMeasurement)
+            .filter(
+                MonthlyMeasurement.monthly_id == data.monthly_id
+            )
+            .first()
+        )
+
         if not measurement or measurement.calibrationc is None:
-            raise HTTPException(status_code=400, detail="유저의 보정 상수가 존재하지 않습니다.")
-        
+            raise HTTPException(
+                status_code=400,
+                detail="유저의 보정 상수가 존재하지 않습니다."
+            )
+
         constant_c = measurement.calibrationc
-        base_cva = measurement.cva_angle  # 유저의 최적 정상 자세일 때의 비전 각도
+        base_cva = measurement.cva_angle
 
 
-        # 현재 센서 데이터 기반 앞뒤 숙임 각도
-        current_hw_pitch = calculate_hw_pitch(
+        # =====================================================
+        # 2. 현재 IMU Pitch 계산
+        # =====================================================
+
+        raw_pitch = calculate_hw_pitch(
             data.current_accel_x,
             data.current_accel_y,
             data.current_accel_z
         )
 
-        # 목을 숙일수록 센서각도는 증가하고 CVA는 감소
+
+        # =====================================================
+        # 3. 사용자별 캐시 초기화
+        # =====================================================
+
+        user_id = data.member_id
+
+        if user_id not in DAILY_MEMORY_CACHE:
+            DAILY_MEMORY_CACHE[user_id] = {
+
+                # 리포트용
+                "total_duration": 0,
+                "cva_sum": 0.0,
+                "normal_duration": 0,
+                "caution_duration": 0,
+                "warning_duration": 0,
+
+                "caution_count": 0,
+                "warning_count": 0,
+
+                # 필터링용
+                "pitch_window": deque(maxlen=FILTER_WINDOW),
+
+                # 자세 판별용
+                "previous_state": "normal",
+
+                # 나쁜 자세 지속시간
+                "bad_posture_started_at": None,
+
+                # 같은 나쁜 자세 구간에서 중복 진동 방지
+                # none / caution / warning
+                "notified_level": "none"
+            }
+
+        user_cache = DAILY_MEMORY_CACHE[user_id]
+
+
+        # =====================================================
+        # 4. 이동평균 적용
+        # =====================================================
+
+        user_cache["pitch_window"].append(raw_pitch)
+
+        filtered_pitch = (
+            sum(user_cache["pitch_window"])
+            / len(user_cache["pitch_window"])
+        )
+
+
+        # =====================================================
+        # 5. CVA 추정
+        # =====================================================
+
         estimated_cva = round(
-            constant_c - current_hw_pitch,
+            constant_c - filtered_pitch,
             2
         )
 
-        angle_deviation = round(base_cva - estimated_cva, 2)
+        angle_deviation = round(
+            base_cva - estimated_cva,
+            2
+        )
 
-        user_level = data.level.lower() if data.level else "normal"
+
+        # =====================================================
+        # 6. 난이도별 주의 기준
+        # =====================================================
+
+        user_level = (
+            data.level.lower()
+            if data.level
+            else "normal"
+        )
 
         if user_level == "hard":
             caution_threshold = 2.0
+
         elif user_level == "easy":
             caution_threshold = 8.0
-        else:  # "normal"
+
+        else:
             caution_threshold = 5.0
 
         warning_threshold = 15.0
 
-        if angle_deviation < caution_threshold:
-            current_state = "normal"
-        elif caution_threshold <= angle_deviation < warning_threshold:
-            current_state = "caution"
-        else:
-            current_state = "warning"
 
-        # 5. 메모리 캐시 유저 세션 초기화 (지속 시간 트래킹용 변수 추가)
-        user_id = data.member_id
-        if user_id not in DAILY_MEMORY_CACHE:
-            DAILY_MEMORY_CACHE[user_id] = {
-                "total_duration": 0,
-                "cva_sum": 0.0,
-                "normal_duration": 0,
-                "caution_count": 0,
-                "warning_count": 0,
-                # 💡 진동 발생 판별을 위한 continuous duration 카운터 (초 단위)
-                "caution_streak": 0,
-                "warning_streak": 0
-            }
+        # =====================================================
+        # 7. 히스테리시스를 적용한 자세 판정
+        # =====================================================
 
-        user_cache = DAILY_MEMORY_CACHE[user_id]
+        previous_state = user_cache["previous_state"]
+
+        if previous_state == "normal":
+
+            if angle_deviation >= warning_threshold:
+                current_state = "warning"
+
+            elif angle_deviation >= caution_threshold:
+                current_state = "caution"
+
+            else:
+                current_state = "normal"
+
+
+        elif previous_state == "caution":
+
+            if angle_deviation >= warning_threshold:
+                current_state = "warning"
+
+            # 주의 상태에서 정상으로 돌아가기 위해서는
+            # 기준값보다 1도 더 낮아져야 함
+            elif angle_deviation < (
+                caution_threshold - HYSTERESIS_DEG
+            ):
+                current_state = "normal"
+
+            else:
+                current_state = "caution"
+
+
+        elif previous_state == "warning":
+
+            # 경고 해제 기준도 1도 여유 부여
+            if angle_deviation >= (
+                warning_threshold - HYSTERESIS_DEG
+            ):
+                current_state = "warning"
+
+            elif angle_deviation >= caution_threshold:
+                current_state = "caution"
+
+            else:
+                current_state = "normal"
+
+
+        user_cache["previous_state"] = current_state
+
+
+        # =====================================================
+        # 8. 리포트용 누적값 계산
+        # =====================================================
+
         user_cache["total_duration"] += 1
-        user_cache["cva_sum"] = round(user_cache["cva_sum"] + estimated_cva, 2)
 
-        # 6. 지속 시간(3초) 계산 및 진동 명령 판단
-        vibration_type = "none"  # 기본: 진동 없음 ("none", "caution", "warning")
+        user_cache["cva_sum"] = round(
+            user_cache["cva_sum"] + estimated_cva,
+            2
+        )
 
         if current_state == "normal":
             user_cache["normal_duration"] += 1
-            # 바른 자세로 돌아오면 스트릭(연속 카운터) 즉시 리셋
-            user_cache["caution_streak"] = 0
-            user_cache["warning_streak"] = 0
 
         elif current_state == "caution":
-            user_cache["caution_streak"] += 1
-            user_cache["warning_streak"] = 0  # warning 스트릭 초기화
-
-            # 정확히 3초째가 되는 순간 "딱 1번" 진동 알림 발생 & 알림 횟수 카운트
-            if user_cache["caution_streak"] == 3:
-                vibration_type = "caution"
-                user_cache["caution_count"] += 1  # 💡 실제 진동 알림 발생 횟수만 1 증가
-            elif user_cache["caution_streak"] > 3:
-                # 3초 이후에도 계속 주의 상태일 때 (필요에 따라 "caution" 유지 혹은 "none")
-                vibration_type = "caution"
+            user_cache["caution_duration"] += 1
 
         elif current_state == "warning":
-            user_cache["warning_streak"] += 1
-            user_cache["caution_streak"] = 0  # caution 스트릭 초기화
+            user_cache["warning_duration"] += 1
 
-            # 정확히 3초째가 되는 순간 "딱 1번" 진동 알림 발생 & 알림 횟수 카운트
-            if user_cache["warning_streak"] == 3:
-                vibration_type = "warning"
-                user_cache["warning_count"] += 1  # 💡 실제 진동 알림 발생 횟수만 1 증가
-            elif user_cache["warning_streak"] > 3:
-                vibration_type = "warning"
 
-        print("=" * 50)
-        print(f"🆔 monthly_id: {data.monthly_id} | member_id: {user_id}")
-        print(f"📊 Constant C: {constant_c:.2f} | Current Pitch: {current_hw_pitch:.2f}°")
-        print(f"🎯 Base CVA: {base_cva:.2f}° -> Estimated CVA: {estimated_cva:.2f}°")
-        print(f"⚠️ 이탈 각도: {angle_deviation:+.2f}° | 상태: {current_state} (C-streak: {user_cache['caution_streak']}s, W-streak: {user_cache['warning_streak']}s)")
-        print(f"📳 진동 명령: {vibration_type}")
-        print("-" * 20)
-        print(f"base_cva         = {base_cva}")
-        print(f"estimated_cva    = {estimated_cva}")
-        print(f"angle_deviation  = {angle_deviation}")
-        print(f"current_state    = {current_state}")
-        print(f"caution_streak   = {user_cache['caution_streak']}s")
-        print(f"warning_streak   = {user_cache['warning_streak']}s")
-        print(f"vibration_type   = {vibration_type}")
-        print("=" * 50)
+        # =====================================================
+        # 9. 실제 시간 기준 자세 지속시간 계산
+        # =====================================================
 
-        # 7. 응답 결과 구성 (vibration_type 추가)
+        now = datetime.now()
+
+        vibration_type = "none"
+        bad_duration = 0.0
+
+
+        if current_state == "normal":
+
+            # 바른 자세로 복귀하면 한 구간 종료
+            user_cache["bad_posture_started_at"] = None
+            user_cache["notified_level"] = "none"
+
+
+        else:
+
+            # 처음 나쁜 자세가 시작된 순간 저장
+            if user_cache["bad_posture_started_at"] is None:
+                user_cache["bad_posture_started_at"] = now
+
+            bad_duration = (
+                now
+                - user_cache["bad_posture_started_at"]
+            ).total_seconds()
+
+
+            # =================================================
+            # 10. 3초 이상 지속된 경우 진동
+            # =================================================
+
+            if bad_duration >= BAD_POSTURE_DURATION_SEC:
+
+                # WARNING은 같은 자세 구간에서 1회만
+                if current_state == "warning":
+
+                    if user_cache["notified_level"] != "warning":
+
+                        vibration_type = "warning"
+
+                        user_cache["warning_count"] += 1
+
+                        user_cache["notified_level"] = "warning"
+
+
+                # CAUTION 역시 1회만
+                elif current_state == "caution":
+
+                    if user_cache["notified_level"] == "none":
+
+                        vibration_type = "caution"
+
+                        user_cache["caution_count"] += 1
+
+                        user_cache["notified_level"] = "caution"
+
+
+        # =====================================================
+        # 11. 디버깅 로그
+        # =====================================================
+
+        print("=" * 60)
+
+        print(
+            f"🆔 monthly_id: {data.monthly_id} "
+            f"| member_id: {user_id}"
+        )
+
+        print(
+            f"📡 Raw Pitch: {raw_pitch:.2f}° "
+            f"| Filtered Pitch: {filtered_pitch:.2f}°"
+        )
+
+        print(
+            f"🎯 Base CVA: {base_cva:.2f}° "
+            f"| Estimated CVA: {estimated_cva:.2f}°"
+        )
+
+        print(
+            f"⚠️ Deviation: {angle_deviation:+.2f}° "
+            f"| State: {current_state}"
+        )
+
+        print(
+            f"⏱ Bad posture duration: "
+            f"{bad_duration:.2f}s"
+        )
+
+        print(
+            f"📳 Vibration: {vibration_type}"
+        )
+
+        print(
+            f"🔔 Already notified: "
+            f"{user_cache['notified_level']}"
+        )
+
+        print("=" * 60)
+
+
+        # =====================================================
+        # 12. API 응답
+        # =====================================================
+
         return {
             "status": "success",
-            "base_cva": base_cva,
-            "constant_c": constant_c,
-            "current_hw_pitch": round(current_hw_pitch, 2),
-            "angle_deviation": angle_deviation,
+
+            "base_cva": round(base_cva, 2),
+
+            "constant_c": round(constant_c, 2),
+
+            "raw_hw_pitch": round(raw_pitch, 2),
+
+            "filtered_hw_pitch": round(filtered_pitch, 2),
+
             "estimated_cva": estimated_cva,
+
+            "angle_deviation": angle_deviation,
+
             "posture_result": current_state,
-            
-            # 💡 하드웨어/앱에서 수신할 최종 진동 명령
-            "vibration_type": vibration_type,  # "none", "caution", "warning"
+
+            "bad_posture_duration": round(
+                bad_duration,
+                2
+            ),
+
+            "vibration_type": vibration_type,
+
             "is_vibrating": vibration_type != "none",
 
             "server_accumulated_data": {
-                "total_duration": user_cache["total_duration"],
-                "cva_sum": user_cache["cva_sum"],
-                "normal_duration": user_cache["normal_duration"],
-                "caution_count": user_cache["caution_count"],
-                "warning_count": user_cache["warning_count"]
+
+                "total_duration":
+                    user_cache["total_duration"],
+
+                "cva_sum":
+                    user_cache["cva_sum"],
+
+                "normal_duration":
+                    user_cache["normal_duration"],
+
+                "caution_duration":
+                    user_cache["caution_duration"],
+
+                "warning_duration":
+                    user_cache["warning_duration"],
+
+                "caution_count":
+                    user_cache["caution_count"],
+
+                "warning_count":
+                    user_cache["warning_count"]
             }
         }
-    
+
+
+    except HTTPException:
+        raise
+
     except Exception as e:
+
         print("ERROR:", repr(e))
+
         db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
 
 @app.post(
     "/api/daily/calibration",
@@ -401,8 +643,8 @@ def auto_save_daily_reports():
                     "member_id": member_id, "report_date": report_date, "total_score": total_score,
                     "cva_sum": report_data["cva_sum"], "total_time": total_time,
                     "normal": report_data["normal_duration"],
-                    "caution": report_data["caution_count"],
-                    "warning": report_data["warning_count"],
+"caution": report_data["caution_duration"],
+"warning": report_data["warning_duration"],
                     "avg_angle": avg_angle,
                     "noti_count": report_data["caution_count"] + report_data["warning_count"],
                     "now": now
