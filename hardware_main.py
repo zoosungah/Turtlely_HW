@@ -107,6 +107,24 @@ def calculate_hw_pitch(acc_x: float, acc_y: float, acc_z: float) -> float:
         math.atan2(-acc_x, acc_y)
     )
 
+def unwrap_angle(current_angle: float, reference_angle: float) -> float:
+    """
+    atan2의 -180° ~ +180° 경계에서 각도가 튀는 현상을 보정한다.
+    예:
+    previous = -175°
+    current = +168°
+    -> 실제 연속된 각도로는 -192°로 처리
+    """
+
+    while current_angle - reference_angle > 180:
+        current_angle -= 360
+
+    while current_angle - reference_angle < -180:
+        current_angle += 360
+
+    return current_angle
+
+
 def get_db():
     db = SessionLocal()
     try: 
@@ -279,15 +297,28 @@ async def track_daily_posture(
 
 
         # =====================================================
-        # 4. 이동평균 적용
-        # =====================================================
+# 4. Pitch 연속성 보정 + 이동평균 적용
+# =====================================================
 
-        user_cache["pitch_window"].append(raw_pitch)
+pitch_window = user_cache["pitch_window"]
 
-        filtered_pitch = (
-            sum(user_cache["pitch_window"])
-            / len(user_cache["pitch_window"])
-        )
+# 기존 Pitch가 있다면 ±180° 경계 보정
+if len(pitch_window) > 0:
+    reference_pitch = pitch_window[-1]
+
+    adjusted_pitch = unwrap_angle(
+        raw_pitch,
+        reference_pitch
+    )
+else:
+    adjusted_pitch = raw_pitch
+
+pitch_window.append(adjusted_pitch)
+
+filtered_pitch = (
+    sum(pitch_window)
+    / len(pitch_window)
+)
 
 
         # =====================================================
@@ -471,9 +502,10 @@ async def track_daily_posture(
         )
 
         print(
-            f"📡 Raw Pitch: {raw_pitch:.2f}° "
-            f"| Filtered Pitch: {filtered_pitch:.2f}°"
-        )
+    f"📡 Raw Pitch: {raw_pitch:.2f}° "
+    f"| Adjusted Pitch: {adjusted_pitch:.2f}° "
+    f"| Filtered Pitch: {filtered_pitch:.2f}°"
+)
 
         print(
             f"🎯 Base CVA: {base_cva:.2f}° "
@@ -596,7 +628,7 @@ async def process_daily_calibration(data: DailyCalibrationRequest, db: Session =
         # 1. 기존 월간 기준 데이터(비전 CVA) 조회
         measurement = db.query(MonthlyMeasurement).filter(MonthlyMeasurement.monthly_id == data.monthly_id).first()
         if not measurement:
-            raise HTTPException(status_code=44, detail="기준 월간 데이터를 찾을 수 없습니다.")
+            raise HTTPException(status_code=404, detail="기준 월간 데이터를 찾을 수 없습니다.")
         
         base_cva = measurement.cva_angle # 기준이 될 비전 각도
 
@@ -619,6 +651,20 @@ async def process_daily_calibration(data: DailyCalibrationRequest, db: Session =
         # 매번 새로 갱신된 일일 보정 상수를 DB에 업데이트해 두고 싶다면 아래 주석을 푸세요.
         measurement.calibrationc = round(daily_constant_c, 2)
         db.commit()
+
+        # =====================================================
+# 새로운 일일 측정 시작이므로 기존 실시간 캐시 초기화
+# =====================================================
+
+member_id = measurement.member_id
+
+if member_id in DAILY_MEMORY_CACHE:
+    del DAILY_MEMORY_CACHE[member_id]
+
+print(
+    f"🧹 DAILY CACHE RESET | "
+    f"member_id={member_id}"
+)
 
         return {
             "status": "success",
