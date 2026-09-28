@@ -17,7 +17,7 @@ import os
 DAILY_MEMORY_CACHE = {}
 
 # 실시간 반응성을 높이기 위해 윈도우 크기를 3으로 축소 (노이즈 방지 유지)
-FILTER_WINDOW = 2
+FILTER_WINDOW = 1
 
 # 임계값 주변에서 상태가 계속 바뀌는 현상 방지
 HYSTERESIS_DEG = 1.0
