@@ -16,17 +16,22 @@ import os
 # 인메모리 변수
 DAILY_MEMORY_CACHE = {}
 
-# 실시간 반응성을 높이기 위해 윈도우 크기를 2로 축소 (노이즈는 방지하면서 즉각 반응)
-FILTER_WINDOW = 2
+# 실시간 반응성을 높이기 위해 윈도우 크기를 3으로 축소 (노이즈 방지 유지)
+FILTER_WINDOW = 3
 
-# 임계값 주변에서 상태 튐 방지
+# 임계값 주변에서 상태가 계속 바뀌는 현상 방지
 HYSTERESIS_DEG = 1.0
+
+# 동일 나쁜 자세 유지 중 연속 진동 간격(초) - 숙이고 있어도 1.5초마다 한 번씩만 울림 방지
+NOTIFICATION_COOLDOWN_SEC = 1.5
+
 
 class HardwareSyncRequest(BaseModel):
     monthly_id: int = Field(..., description="월간 측정 ID", example=1)
     opt_accel_x: float = Field(..., description="HW X축 가속도", example=0.05)
     opt_accel_y: float = Field(..., description="HW Y축 가속도", example=0.98)
     opt_accel_z: float = Field(..., description="HW Z축 가속도", example=0.12)
+
 
 class DailyMeasurementRequest(BaseModel):
     monthly_id: int = Field(..., description="최신 월간 측정 ID", example=1)
@@ -36,12 +41,14 @@ class DailyMeasurementRequest(BaseModel):
     current_accel_z: float = Field(..., description="현재 HW Z축 가속도 Raw", example=0.25)
     level: str = Field(default="normal", description="유저가 선택한 측정 난이도 (easy, normal, hard)", examples=["normal"])
 
+
 class DailyCalibrationRequest(BaseModel):
     monthly_id: int = Field(..., description="유저의 기준 CVA를 조회하기 위한 월간 측정 ID", example=1)
     current_accel_x: float = Field(..., description="현재 바른 자세에서의 HW X축 가속도 Raw", example=0.05)
     current_accel_y: float = Field(..., description="현재 바른 자세에서의 HW Y축 가속도 Raw", example=0.98)
     current_accel_z: float = Field(..., description="현재 바른 자세에서의 HW Z축 가속도 Raw", example=0.12)
-    
+
+
 class DailyReportSaveRequest(BaseModel):
     member_id: int = Field(..., description="유저 고유 식별 ID", example=1)
     angle: float = Field(..., description="측정된 목 각도", example=48.5)
@@ -57,44 +64,49 @@ engine = create_engine(DATABASE_URL, pool_recycle=3600)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
+
 class MonthlyMeasurement(Base):
     __tablename__ = "monthly_measurement"
-    
+
     monthly_id = Column(BigInteger, primary_key=True, autoincrement=True)
     cva_angle = Column(Float, nullable=False)
     member_id = Column(BigInteger, nullable=True)
-    
+
     hw_accelx = Column(Float, nullable=True)
     hw_accely = Column(Float, nullable=True)
     hw_accelz = Column(Float, nullable=True)
     calibrationc = Column(Float, nullable=True)
 
-def calculate_hw_pitch(acc_x: float, acc_y: float, acc_z: float) -> float:
-    """
-    3축 가속도 기반 피치 계산
-    acc_z 성분까지 포함하여 기기 착용 각도가 미세하게 틀어져도 안정적인 Pitch 산출
-    """
-    vector_magnitude = math.sqrt(acc_x ** 2 + acc_y ** 2 + acc_z ** 2)
 
+def calculate_hw_pitch(acc_x: float, acc_y: float, acc_z: float) -> float:
+    vector_magnitude = math.sqrt(acc_x ** 2 + acc_y ** 2 + acc_z ** 2)
     if vector_magnitude == 0:
         raise HTTPException(
             status_code=400,
             detail="가속도 벡터 크기가 0일 수 없습니다."
         )
+    return math.degrees(math.atan2(-acc_x, acc_y))
 
-    # 3축 중력 벡터를 온전히 반영하여 정확도 향상
-    return math.degrees(math.atan2(-acc_x, math.sqrt(acc_y ** 2 + acc_z ** 2)))
+
+def unwrap_angle(current_angle: float, reference_angle: float) -> float:
+    while current_angle - reference_angle > 180:
+        current_angle -= 360
+    while current_angle - reference_angle < -180:
+        current_angle += 360
+    return current_angle
+
 
 def get_db():
     db = SessionLocal()
-    try: 
+    try:
         yield db
-    finally: 
+    finally:
         db.close()
 
+
 app = FastAPI(
-    title="HW API",
-    description="터틀훅 가속도 데이터 기반 실시간 CVA 추정 및 즉각 알림 API",
+    title="HW API 명",
+    description="터틀훅에서 받는 데이터와 관련된 FastAPI",
     version="1.1.0"
 )
 
@@ -106,10 +118,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 @app.post(
     "/api/monthly/hardware",
     tags=["월간 측정 관련 API"],
-    summary="비전 월간 측정 기반 CVA 변환 상수 C 도출"
+    summary="비전의 월간 측정 데이터를 기반으로 HW에서 사용할 CVA 변환 공식의 보정 상수 C 도출",
+    description="""
+    ### [동작 흐름]
+    1. 플러터가 비전 서버로부터 응답받은 'monthly_id'를 본 API로 전달
+    2. 해당 타임스탬프 시점의 하드웨어 3축 데이터(X, Y, Z) 수신
+    3. CVA 공식 기반으로 오프셋 'C' 도출
+    """,
+    response_description="성공 시 생성된 오프셋 상수 C 반환"
 )
 async def sync_hardware_constants(data: HardwareSyncRequest, db: Session = Depends(get_db)):
     try:
@@ -117,38 +137,64 @@ async def sync_hardware_constants(data: HardwareSyncRequest, db: Session = Depen
         if not measurement:
             raise HTTPException(status_code=404, detail="데이터를 찾을 수 없습니다.")
 
-        hw_pitch = calculate_hw_pitch(data.opt_accel_x, data.opt_accel_y, data.opt_accel_z)
+        vector_magnitude = math.sqrt(data.opt_accel_x**2 + data.opt_accel_y**2 + data.opt_accel_z**2)
+        if vector_magnitude == 0:
+            raise HTTPException(status_code=400, detail="벡터 크기가 0일 수 없습니다.")
+
+        hw_pitch = calculate_hw_pitch(
+            data.opt_accel_x,
+            data.opt_accel_y,
+            data.opt_accel_z
+        )
+
         computed_c = measurement.cva_angle + hw_pitch
 
         measurement.hw_accelx = data.opt_accel_x
         measurement.hw_accely = data.opt_accel_y
         measurement.hw_accelz = data.opt_accel_z
         measurement.calibrationc = round(computed_c, 2)
-        
+
         db.commit()
         return {
-            "status": "success", 
+            "status": "success",
             "monthly_id": data.monthly_id,
             "derived_constant_c": round(computed_c, 2)
         }
-    except HTTPException:
-        raise
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @app.post(
     "/api/daily",
     tags=["일일 측정 관련 API"],
-    summary="실시간 CVA 각도 추정 및 즉각 알림 판별",
-    description="고개를 숙이면 3초 대기 없이 즉각 진동 알림을 발생시킵니다."
+    summary="실시간 CVA 각도 추정 및 자세 판별",
+    description="""
+    ### 임계치 기반으로 즉각 알림
+    - 정상: 진동 없음
+    - 주의/경고: 숙이자마자 즉시 판별 및 진동 (쿨다운 1.5초)
+    + 오늘 총 누적된 caution/warning 횟수 반환
+    """,
+    response_description="실시간으로 추정된 CVA 각도 및 판별 결과를 반환합니다."
 )
 async def track_daily_posture(
     data: DailyMeasurementRequest,
     db: Session = Depends(get_db)
 ):
     try:
+        # [디버깅] 인입 요청 Raw 데이터 로깅
+        print("=" * 60)
+        print("📥 DAILY RAW SENSOR REQUEST")
+        print(f"monthly_id = {data.monthly_id}")
+        print(f"member_id = {data.member_id}")
+        print(f"X = {data.current_accel_x}")
+        print(f"Y = {data.current_accel_y}")
+        print(f"Z = {data.current_accel_z}")
+        print("=" * 60)
+
+        # =====================================================
         # 1. 월간 측정 기준값 조회
+        # =====================================================
         measurement = (
             db.query(MonthlyMeasurement)
             .filter(MonthlyMeasurement.monthly_id == data.monthly_id)
@@ -164,18 +210,23 @@ async def track_daily_posture(
         constant_c = measurement.calibrationc
         base_cva = measurement.cva_angle
 
+        # =====================================================
         # 2. 현재 IMU Pitch 계산
+        # =====================================================
         raw_pitch = calculate_hw_pitch(
             data.current_accel_x,
             data.current_accel_y,
             data.current_accel_z
         )
 
+        # =====================================================
         # 3. 사용자별 캐시 초기화
+        # =====================================================
         user_id = data.member_id
 
         if user_id not in DAILY_MEMORY_CACHE:
             DAILY_MEMORY_CACHE[user_id] = {
+                # 리포트용
                 "total_duration": 0,
                 "cva_sum": 0.0,
                 "normal_duration": 0,
@@ -183,28 +234,49 @@ async def track_daily_posture(
                 "warning_duration": 0,
                 "caution_count": 0,
                 "warning_count": 0,
+
+                # 필터링용
                 "pitch_window": deque(maxlen=FILTER_WINDOW),
+
+                # 자세 판별용
                 "previous_state": "normal",
-                "notified_level": "none"  # none / caution / warning
+
+                # 나쁜 자세 지속시간 추적
+                "bad_posture_started_at": None,
+
+                # 알림 쿨다운 및 중복 방지용
+                "last_notified_at": 0.0,
+                "notified_level": "none"
             }
 
         user_cache = DAILY_MEMORY_CACHE[user_id]
 
-        # 4. 상대 각도 계산 및 빠른 반응 필터(MA2)
+        # =====================================================
+        # 4. 캘리브레이션 기준 상대 각도 계산 + MA 필터
+        # =====================================================
         baseline_pitch = constant_c - base_cva
-        raw_delta = ((raw_pitch - baseline_pitch + 180) % 360) - 180
+
+        raw_delta = (
+            (raw_pitch - baseline_pitch + 180) % 360
+        ) - 180
 
         pitch_window = user_cache["pitch_window"]
         pitch_window.append(raw_delta)
+
         filtered_delta = sum(pitch_window) / len(pitch_window)
         filtered_pitch = baseline_pitch + filtered_delta
 
+        # =====================================================
         # 5. CVA 추정
+        # =====================================================
         angle_deviation = round(filtered_delta, 2)
         estimated_cva = round(base_cva - angle_deviation, 2)
 
+        # =====================================================
         # 6. 난이도별 주의 기준
+        # =====================================================
         user_level = data.level.lower() if data.level else "normal"
+
         if user_level == "hard":
             caution_threshold = 2.0
         elif user_level == "easy":
@@ -214,7 +286,9 @@ async def track_daily_posture(
 
         warning_threshold = 15.0
 
+        # =====================================================
         # 7. 히스테리시스를 적용한 자세 판정
+        # =====================================================
         previous_state = user_cache["previous_state"]
 
         if previous_state == "normal":
@@ -243,7 +317,9 @@ async def track_daily_posture(
 
         user_cache["previous_state"] = current_state
 
+        # =====================================================
         # 8. 리포트용 누적값 계산
+        # =====================================================
         user_cache["total_duration"] += 1
         user_cache["cva_sum"] = round(user_cache["cva_sum"] + estimated_cva, 2)
 
@@ -255,28 +331,77 @@ async def track_daily_posture(
             user_cache["warning_duration"] += 1
 
         # =====================================================
-        # 9. 실시간 즉각 진동 알림 로직 (대기 시간 제거)
+        # 9. 즉각 반응 알림 판별 (고개 숙이자마자 즉시 발생)
         # =====================================================
+        now = datetime.now()
         vibration_type = "none"
+        bad_duration = 0.0
+        now_ts = time.time()
 
         if current_state == "normal":
-            # 정상 자세로 돌아오면 알림 플래그 리셋 (다음번에 숙이면 바로 다시 울림)
+            user_cache["bad_posture_started_at"] = None
             user_cache["notified_level"] = "none"
+        else:
+            if user_cache["bad_posture_started_at"] is None:
+                user_cache["bad_posture_started_at"] = now
 
-        elif current_state == "warning":
-            # 경고 상태에 진입하자마자 즉시 1회 진동
-            if user_cache["notified_level"] != "warning":
-                vibration_type = "warning"
-                user_cache["warning_count"] += 1
-                user_cache["notified_level"] = "warning"
+            bad_duration = (now - user_cache["bad_posture_started_at"]).total_seconds()
 
-        elif current_state == "caution":
-            # 주의 상태에 진입하자마자 즉시 1회 진동
-            if user_cache["notified_level"] == "none":
-                vibration_type = "caution"
-                user_cache["caution_count"] += 1
-                user_cache["notified_level"] = "caution"
+            state_changed = (user_cache["notified_level"] != current_state)
+            cooldown_passed = (now_ts - user_cache["last_notified_at"]) >= NOTIFICATION_COOLDOWN_SEC
 
+            if current_state == "warning":
+                if state_changed or cooldown_passed:
+                    vibration_type = "warning"
+                    user_cache["warning_count"] += 1
+                    user_cache["notified_level"] = "warning"
+                    user_cache["last_notified_at"] = now_ts
+
+            elif current_state == "caution":
+                if state_changed or cooldown_passed:
+                    vibration_type = "caution"
+                    user_cache["caution_count"] += 1
+                    user_cache["notified_level"] = "caution"
+                    user_cache["last_notified_at"] = now_ts
+
+        # =====================================================
+        # 10. 디버깅 로그 (연산 결과 확인용)
+        # =====================================================
+        print("=" * 60)
+        print(
+            f"🆔 monthly_id: {data.monthly_id} "
+            f"| member_id: {user_id}"
+        )
+        print(
+            f"📡 Raw Pitch: {raw_pitch:.2f}° "
+            f"| Baseline Pitch: {baseline_pitch:.2f}° "
+            f"| Raw Delta: {raw_delta:+.2f}° "
+            f"| Filtered Delta: {filtered_delta:+.2f}°"
+        )
+        print(
+            f"🎯 Base CVA: {base_cva:.2f}° "
+            f"| Estimated CVA: {estimated_cva:.2f}°"
+        )
+        print(
+            f"⚠️ Deviation: {angle_deviation:+.2f}° "
+            f"| State: {current_state}"
+        )
+        print(
+            f"⏱ Bad posture duration: "
+            f"{bad_duration:.2f}s"
+        )
+        print(
+            f"📳 Vibration: {vibration_type}"
+        )
+        print(
+            f"🔔 Already notified: "
+            f"{user_cache['notified_level']}"
+        )
+        print("=" * 60)
+
+        # =====================================================
+        # 11. API 응답
+        # =====================================================
         return {
             "status": "success",
             "base_cva": round(base_cva, 2),
@@ -286,7 +411,7 @@ async def track_daily_posture(
             "estimated_cva": estimated_cva,
             "angle_deviation": angle_deviation,
             "posture_result": current_state,
-            "bad_posture_duration": 0.0,
+            "bad_posture_duration": round(bad_duration, 2),
             "vibration_type": vibration_type,
             "is_vibrating": vibration_type != "none",
             "server_accumulated_data": {
@@ -310,18 +435,40 @@ async def track_daily_posture(
             detail=str(e)
         )
 
+
 @app.post(
     "/api/daily/calibration",
     tags=["일일 측정 관련 API"],
-    summary="일일 측정 전 착용 오차 보정용 캘리브레이션"
+    summary="일일 측정 시작 전 착용 오차 보정을 위한 데일리 캘리브레이션",
+    description="""
+    ### [동작 흐름]
+    1. 사용자가 당일 기기 착용 후 '바른 자세'에서 0점 조절 요청
+    2. 기존 비전 기준 각도(base_cva)와 현재 가속도 기반 Pitch의 차이를 계산하여 새로운 일일 보정 상수 C 도출
+    3. 계산된 일일 보정 상수를 반환하여, 이후 실시간 측정(/api/daily) 시 사용할 수 있도록 함
+    """,
+    response_description="당일 착용 오차가 보정된 새로운 일일 보정 상수 C 반환"
 )
 async def process_daily_calibration(data: DailyCalibrationRequest, db: Session = Depends(get_db)):
     try:
+        print("=" * 50)
+        print("📥 DAILY CALIBRATION REQUEST")
+        print(f"monthly_id = {data.monthly_id}")
+        print(f"X = {data.current_accel_x}")
+        print(f"Y = {data.current_accel_y}")
+        print(f"Z = {data.current_accel_z}")
+        print("=" * 50)
+
+        # 1. 기존 월간 기준 데이터(비전 CVA) 조회
         measurement = db.query(MonthlyMeasurement).filter(MonthlyMeasurement.monthly_id == data.monthly_id).first()
         if not measurement:
             raise HTTPException(status_code=404, detail="기준 월간 데이터를 찾을 수 없습니다.")
-        
+
         base_cva = measurement.cva_angle
+
+        # 2. 현재 가속도 Raw 센서값 기반으로 현재 착용 상태의 Pitch 계산
+        vector_magnitude = math.sqrt(data.current_accel_x**2 + data.current_accel_y**2 + data.current_accel_z**2)
+        if vector_magnitude == 0:
+            raise HTTPException(status_code=400, detail="가속도 벡터 크기가 0일 수 없습니다.")
 
         current_pitch = calculate_hw_pitch(
             data.current_accel_x,
@@ -329,15 +476,20 @@ async def process_daily_calibration(data: DailyCalibrationRequest, db: Session =
             data.current_accel_z
         )
 
+        # 3. 새로운 일일 보정 상수 계산
         daily_constant_c = base_cva + current_pitch
-
         measurement.calibrationc = round(daily_constant_c, 2)
         db.commit()
 
-        # 캐시 초기화
+        # 새로운 일일 측정 시작이므로 기존 실시간 캐시 초기화
         member_id = measurement.member_id
         if member_id in DAILY_MEMORY_CACHE:
             del DAILY_MEMORY_CACHE[member_id]
+
+        print(
+            f"🧹 DAILY CACHE RESET | "
+            f"member_id={member_id}"
+        )
 
         return {
             "status": "success",
@@ -357,17 +509,18 @@ async def process_daily_calibration(data: DailyCalibrationRequest, db: Session =
             detail=str(e)
         )
 
+
 def auto_save_daily_reports():
     db: Session = SessionLocal()
     try:
         now = datetime.now()
         report_date = now.date()
-        
+
         for member_id, report_data in list(DAILY_MEMORY_CACHE.items()):
             total_time = report_data["total_duration"]
             if total_time == 0:
                 continue
-                
+
             avg_angle = round(report_data["cva_sum"] / total_time, 2)
             total_score = int(round((report_data["normal_duration"] / total_time) * 100))
 
@@ -380,8 +533,11 @@ def auto_save_daily_reports():
                     ":normal, :caution, :warning, :avg_angle, :noti_count, :now, :now)"
                 ),
                 {
-                    "member_id": member_id, "report_date": report_date, "total_score": total_score,
-                    "cva_sum": report_data["cva_sum"], "total_time": total_time,
+                    "member_id": member_id,
+                    "report_date": report_date,
+                    "total_score": total_score,
+                    "cva_sum": report_data["cva_sum"],
+                    "total_time": total_time,
                     "normal": report_data["normal_duration"],
                     "caution": report_data["caution_duration"],
                     "warning": report_data["warning_duration"],
@@ -394,20 +550,26 @@ def auto_save_daily_reports():
         db.commit()
         DAILY_MEMORY_CACHE.clear()
         print(f"[{now}] 데일리 리포트 자동 마감 배치 정산 완료!")
-        
+
     except Exception as e:
         db.rollback()
         print(f"자동 마감 배치 에러 발생: {str(e)}")
     finally:
         db.close()
 
-# 스케줄러 등록
+
 scheduler = BackgroundScheduler(timezone="Asia/Seoul")
 scheduler.add_job(auto_save_daily_reports, 'cron', hour=23, minute=59, second=0)
 scheduler.start()
 
+
 @app.get("/api/daily/memory-check", tags=["디버깅용 임시 API"])
 async def check_current_memory_cache():
+    """
+    ### 일일 측정 데이터 디버깅용 api...
+    밤 23:59 배치 정산이 돌기 전, 현재 파이썬 에 
+    실시간으로 모이고 있는 유저별 일일 측정 누적 데이터를 그대로 반환합니다.
+    """
     return {
         "status": "success",
         "current_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
